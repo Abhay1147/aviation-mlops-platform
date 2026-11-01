@@ -1,0 +1,27 @@
+services:
+  ingestion:
+    build: .
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: aviation_mlops
+      DB_USER: aviation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command: python -m src.ingestion.weather
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: aviation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: aviation_mlops
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

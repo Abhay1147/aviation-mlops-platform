@@ -1,0 +1,21 @@
+# Local Python environments
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Local datasets
+data/
+
+# macOS files
+.DS_Store
+
+# editor settings
+.vscode/
