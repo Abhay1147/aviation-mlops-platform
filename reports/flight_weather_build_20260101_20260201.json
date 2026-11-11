@@ -1,0 +1,15 @@
+{
+  "flights": 161992,
+  "matched_flights": 161981,
+  "unmatched_flights": 11,
+  "matched_percent": 99.99,
+  "unresolved_departure_times": 0,
+  "ambiguous_weather_reports_excluded": 2,
+  "prediction_minutes_before_departure": 60,
+  "maximum_weather_age_minutes": 90,
+  "oldest_matched_weather_minutes": 87.0,
+  "rows_dropped_no_weather": 11,
+  "output_flights": 161981,
+  "start_date": "2026-01-01",
+  "end_date_exclusive": "2026-02-01"
+}
