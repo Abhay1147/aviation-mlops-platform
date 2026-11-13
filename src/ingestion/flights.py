@@ -3,37 +3,38 @@ import os
 import psycopg2 
 from dotenv import load_dotenv
 from io import StringIO
+import argparse
 
 def main():
-    
-    file_path = "data/raw/Aviation_flight.csv"
-    
-    check_connection()
+    parser = argparse.ArgumentParser(
+        description="Load a flight CSV into PostgreSQL."
+    )
+    parser.add_argument("--file", required=True)
+    args = parser.parse_args()
 
-    chunks = pd.read_csv(
-        file_path,
-        chunksize=10000,
-        dtype="string",
-        encoding= "utf-8-sig")
-    
+    check_connection()
     total_rows = 0
 
-    for batch_num, chunk in enumerate(chunks, start=1):
-        prepared_data = prep_flights(chunk)
-        flights_inserted, outcomes_inserted = save_batch(prepared_data)
-        print(
-            f"saved {flights_inserted:,} new flights and {outcomes_inserted:,} new outcomes"
+    with pd.read_csv(
+        args.file,
+        chunksize=10000,
+        dtype="string",
+        encoding="utf-8-sig"
+    ) as chunks:
+        for batch_num, chunk in enumerate(chunks, start=1):
+            prepared_data = prep_flights(chunk)
+            flights_inserted, outcomes_inserted = save_batch(
+                prepared_data
+            )
+            total_rows += len(prepared_data)
 
-        )
-
-        total_rows += len(prepared_data)
-
-        print(
-            f" BATCH NUMBER {batch_num} |"
-            f"PREPARED_DATA {len(prepared_data):,} | rows "
-            f"total rows {total_rows}"
-        )
-
+            print(
+                f"Batch {batch_num} | "
+                f"Prepared: {len(prepared_data):,} | "
+                f"New flights: {flights_inserted:,} | "
+                f"New outcomes: {outcomes_inserted:,} | "
+                f"Total processed: {total_rows:,}"
+            )
     
 def prep_flights(flight_df):
 

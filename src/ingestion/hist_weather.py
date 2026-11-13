@@ -6,8 +6,10 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extras import Json, execute_values
+import argparse
 
-def fetch_historical_weather():
+def fetch_historical_weather(start_date, end_date):
+    
     url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
     airports = [
@@ -23,8 +25,8 @@ def fetch_historical_weather():
             "IL_ASOS", "AZ_ASOS", "WA_ASOS"
         ],
         "data": "all",
-        "sts": "2025-12-31T00:00:00Z",
-        "ets": "2026-02-02T00:00:00Z",
+        "sts": f"{start_date}T00:00:00Z",
+        "ets": f"{end_date}T00:00:00Z",
         "tz": "UTC",
         "format": "onlycomma",
         "report_type": [3, 4],
@@ -162,14 +164,17 @@ def save_historical_weather(weather_df, prepared):
         connection.close()
 
 def main():
-    project_root = Path(__file__).resolve().parents[2]
-    source_path = (
-        project_root / "data" / "raw" / "weather"
-        / "iem_20251231_20260202.csv"
+    parser = argparse.ArgumentParser(
+        description="Load a historical-weather CSV into PostgreSQL."
     )
+    parser.add_argument("--file", required=True)
+    args = parser.parse_args()
+
+    source_path = Path(args.file)
 
     weather_df = pd.read_csv(
         source_path,
+        comment="#",
         dtype="string",
         keep_default_na=False
     )
@@ -179,8 +184,9 @@ def main():
 
     print(f"Source observations: {len(weather_df):,}")
     print(f"New observations saved: {inserted:,}")
-    print(f"Existing reports skipped: {len(weather_df) - inserted:,}")
-
-
+    print(
+        f"Existing reports skipped: "
+        f"{len(weather_df) - inserted:,}"
+    )
 if __name__ == "__main__":
     main()
