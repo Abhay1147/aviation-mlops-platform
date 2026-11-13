@@ -18,9 +18,6 @@ from src.features.weather_features import add_weather_features
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_AIRPORTS = list(AIRPORT_TIMEZONES)
 
-START_DATE = "2026-01-01"
-END_DATE = "2026-02-01"
-
 PREDICTION_MINUTES = 60
 MAX_WEATHER_AGE_MINUTES = 90
 
@@ -95,11 +92,11 @@ def load_data(start_date, end_date):
     """).bindparams(bindparam("airports", expanding=True))
 
     weather_start = (
-        pd.Timestamp(START_DATE, tz="UTC")
+        pd.Timestamp(start_date, tz="UTC")
         - pd.Timedelta(days=1)
     )
     weather_end = (
-        pd.Timestamp(END_DATE, tz="UTC")
+        pd.Timestamp(end_date, tz="UTC")
         + pd.Timedelta(days=1)
     )
 
@@ -112,10 +109,10 @@ def load_data(start_date, end_date):
                     flight_query,
                     connection,
                     params={
-                        "airports": PROJECT_AIRPORTS,
-                        "start_date": START_DATE,
-                        "end_date": END_DATE
-                    },
+                    "airports": PROJECT_AIRPORTS,
+                    "start_date": start_date,
+                    "end_date": end_date
+                },
                     parse_dates=["flight_date"]
                 )
 
@@ -301,6 +298,20 @@ def main():
         args.start_date,
         args.end_date
     )
+    flight_dates = pd.to_datetime(flights["flight_date"])
+
+    if not (
+        (flight_dates >= pd.Timestamp(args.start_date))
+        & (flight_dates < pd.Timestamp(args.end_date))
+    ).all():
+        raise ValueError("Loaded flights fall outside the requested dates.")
+
+    print(
+        f"Loaded flight dates: "
+        f"{flight_dates.min():%Y-%m-%d} to "
+        f"{flight_dates.max():%Y-%m-%d}"
+    )
+
 
     dataset, audit = build_dataset(flights, weather)
 
