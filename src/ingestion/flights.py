@@ -116,8 +116,8 @@ def check_connection():
     load_dotenv()
 
     connection = psycopg2.connect(
-        host = "localhost",
-        port = 5433,
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5433")),
         dbname = "aviation_mlops",
         user = "aviation",
         password = os.environ["POSTGRES_PASSWORD"]
@@ -183,8 +183,8 @@ def save_batch(prepared_data):
     load_dotenv()
 
     connection = psycopg2.connect(
-        host = "localhost",
-        port = 5433,
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5433")),
         dbname = "aviation_mlops",
         user = "aviation",
         password = os.environ["POSTGRES_PASSWORD"]
