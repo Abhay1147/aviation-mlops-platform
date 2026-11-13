@@ -1,4 +1,3 @@
-from sqlalchemy import true
 import pandas as pd 
 import os
 import psycopg2 
