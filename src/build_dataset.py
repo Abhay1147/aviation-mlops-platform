@@ -186,6 +186,15 @@ def build_dataset(flights, weather):
     matchable_flights = flights.loc[valid_times].sort_values(
         ["prediction_time_utc", "airport_code"]
     )
+    matchable_flights["prediction_time_utc"] = (
+    matchable_flights["prediction_time_utc"]
+    .astype("datetime64[ns, UTC]")
+)
+
+    eligible_weather["observation_time"] = (
+        eligible_weather["observation_time"]
+        .astype("datetime64[ns, UTC]")
+    )
 
     matched = pd.merge_asof(
         matchable_flights,
