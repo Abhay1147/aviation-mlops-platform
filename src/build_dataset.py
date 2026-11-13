@@ -45,8 +45,8 @@ def load_data(start_date, end_date):
         "postgresql+psycopg2",
         username="aviation",
         password=os.environ["POSTGRES_PASSWORD"],
-        host="localhost",
-        port=5433,
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5433")),
         database="aviation_mlops"
     )
 
