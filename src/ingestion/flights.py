@@ -22,6 +22,18 @@ def main():
         encoding="utf-8-sig"
     ) as chunks:
         for batch_num, chunk in enumerate(chunks, start=1):
+            missing_number = (
+                chunk["OP_CARRIER_FL_NUM"].fillna("").str.strip().eq("")
+            )
+
+            skipped = int(missing_number.sum())
+            if skipped:
+                print(f"Skipping {skipped:,} rows missing flight numbers.")
+
+            chunk = chunk.loc[~missing_number].copy()
+            if chunk.empty:
+                continue
+
             prepared_data = prep_flights(chunk)
             flights_inserted, outcomes_inserted = save_batch(
                 prepared_data
