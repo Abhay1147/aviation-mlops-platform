@@ -49,12 +49,14 @@ while [[ "$CURRENT" < "$END_EXCLUSIVE" ]]; do
 
     echo "Starting month: $MONTH"
 
-    docker compose run --rm -T ingestion \
-        python -m src.ingestion.download_flights \
+    docker compose run --rm -T \
+        --user "$(id -u):$(id -g)" \
+        ingestion python -m src.ingestion.download_flights \
         --month "$MONTH"
 
-    docker compose run --rm -T ingestion \
-        python -m src.ingestion.download_weather \
+    docker compose run --rm -T \
+        --user "$(id -u):$(id -g)" \
+        ingestion python -m src.ingestion.download_weather \
         --month "$MONTH"
 
     aws s3 cp "$ARCHIVE" \

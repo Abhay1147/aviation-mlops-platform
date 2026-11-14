@@ -48,19 +48,22 @@ aws s3 cp \
 
 echo "Loading flights..."
 
-docker compose run --rm ingestion \
-    python -m src.ingestion.flights \
+docker compose run --rm \
+    --user "$(id -u):$(id -g)" \
+    ingestion python -m src.ingestion.flights \
     --file "$FLIGHT_FILE"
 
 echo "Loading historical weather..."
 
-docker compose run --rm ingestion \
-    python -m src.ingestion.hist_weather \
+docker compose run --rm \
+    --user "$(id -u):$(id -g)" \
+    ingestion python -m src.ingestion.hist_weather \
     --file "$WEATHER_FILE"
 
 echo "Building dataset..."
 
 docker compose run --rm \
+    --user "$(id -u):$(id -g)" \
     -v "$PROJECT_ROOT/reports:/app/reports" \
     ingestion python -m src.build_dataset \
     --start-date "$START_DATE" \
