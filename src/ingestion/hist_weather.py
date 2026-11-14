@@ -7,6 +7,7 @@ import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extras import Json, execute_values
 import argparse
+import time
 
 def fetch_historical_weather(start_date, end_date):
     
@@ -36,8 +37,32 @@ def fetch_historical_weather(start_date, end_date):
         "elev": "no"
     }
 
-    response = requests.get(url, params=params, timeout=180)
-    response.raise_for_status()
+    for attempt in range(1,5):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=(30,180)
+            )
+            response.raise_for_status()
+            break
+        except(
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout
+        ) as error:
+            if attempt ==4:
+                raise
+            delay = 15 * attempt
+
+            print(
+                f"Weather download interrupted: {error}"
+                f"Retrying in {delay} seconds"
+                f"(attempt { attempt+1}/4)",
+                flush=True
+            )
+            time.sleep(delay)
+
 
     weather_df = pd.read_csv(
         StringIO(response.text),
