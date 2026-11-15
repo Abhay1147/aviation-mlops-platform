@@ -4,3 +4,8 @@ pyarrow
 python-dotenv
 psycopg2-binary
 sqlalchemy
+scikit-learn
+joblib
+xgboost
+lightgbm
+catboost
