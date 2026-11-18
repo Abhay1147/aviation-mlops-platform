@@ -2,9 +2,9 @@ import os
 from datetime import datetime, timezone
 from time import perf_counter
 
-import joblib
 import numpy as np
 import pandas as pd
+from joblib import load
 from sklearn.base import clone
 from sklearn.metrics import precision_recall_curve
 from sqlalchemy import URL, bindparam, create_engine, text
@@ -14,13 +14,25 @@ from src.features.flight_features import (
     add_flight_time_features,
 )
 from src.models.evaluation import evaluate, save_results
+from src.models.historical_delay_rates import (
+    AIRPORT_PRIOR_FLIGHTS,
+    ARCHIVE_INDEX,
+    AVAILABILITY_BUFFER_DAYS,
+    RATE_COLUMNS,
+    historical_rates,
+    load_history,
+)
 from src.models.train_lightgbm import DATA_DIR, ROOT, load_split
 from src.models.tune_threshold import prepare_features
 from src.prepare_model_data import SPLITS
 
 
-BASE_RUN = "20261118T013557Z_lightgbm_448d18"
-VOLUME_COLUMNS = ["origin_departures_prev_60m", "origin_departures_near_60m"]
+MODEL_RUN = "20261118T013557Z_lightgbm_448d18"
+COMPARISON_RUN = "20261118T032845943376Z_schedule_volume"
+VOLUME_COLUMNS = [
+    "origin_departures_prev_60m",
+    "origin_departures_near_60m",
+]
 HOUR_NS = pd.Timedelta(hours=1).value
 
 SCHEDULE_QUERY = text("""
@@ -58,52 +70,57 @@ def monthly_counts(connection, start, end):
         ordered = np.sort(times)
         left = np.searchsorted(ordered, times - HOUR_NS)
         before = np.searchsorted(ordered, times) - left
-        # The wider window includes the flight itself, so subtract one.
-        nearby = np.searchsorted(ordered, times + HOUR_NS) - left - 1
 
+        # The wider window includes the current flight, so subtract one.
+        nearby = np.searchsorted(ordered, times + HOUR_NS) - left - 1
         counts = pd.DataFrame(
             {VOLUME_COLUMNS[0]: before, VOLUME_COLUMNS[1]: nearby},
             index=group["flight_id"].to_numpy(),
             dtype="float32",
         )
-        # Neighboring dates contribute to counts but are emitted in their own month.
+
         in_month = group["flight_date"].ge(start) & group["flight_date"].lt(end)
         parts.append(counts.loc[in_month.to_numpy()])
 
     return pd.concat(parts)
 
 
-def load_with_volume(connection, split, artifact):
+def load_experiment_split(connection, split, artifact, history):
     start, end = SPLITS[split]
     months = pd.date_range(start, end, freq="MS", inclusive="left")
 
-    print(f"Building schedule counts for {split}...", flush=True)
+    print(f"Building schedule counts and historical rates for {split}...", flush=True)
     counts = pd.concat([
         monthly_counts(connection, month, month + pd.offsets.MonthBegin(1))
         for month in months
     ])
 
-    frame, labels = load_split(split)
-    ids = pd.read_parquet(
-        DATA_DIR / f"{split}.parquet", columns=["flight_id"]
-    )["flight_id"]
-    aligned = counts.reindex(ids.to_numpy())
-
+    metadata = pd.read_parquet(
+        DATA_DIR / f"{split}.parquet",
+        columns=["flight_id", "origin", "carrier", "prediction_time_utc"],
+    )
+    aligned = counts.reindex(metadata["flight_id"].to_numpy())
     if aligned.isna().any().any():
         raise ValueError(f"Missing schedule counts for some {split} flights.")
 
+    rates = historical_rates(metadata, history)
+    print(
+        f"{split}: {np.isfinite(rates[:, 0]).mean():.1%} "
+        "of flights have an eligible airport history",
+        flush=True,
+    )
+
+    frame, labels = load_split(split)
     features = prepare_features(frame, artifact, "lightgbm")
-    for column in VOLUME_COLUMNS:
-        features[column] = aligned[column].to_numpy()
+    features[VOLUME_COLUMNS] = aligned.to_numpy()
+    features[RATE_COLUMNS] = rates
 
     return features, labels
 
 
 def main():
-    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}_schedule_volume"
-    artifact = joblib.load(
-        ROOT / "data" / "models" / BASE_RUN / "lightgbm.joblib"
-    )
+    run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}_history_rates"
+    artifact = load(ROOT / "data" / "models" / MODEL_RUN / "lightgbm.joblib")
 
     engine = create_engine(URL.create(
         "postgresql+psycopg2",
@@ -116,17 +133,20 @@ def main():
 
     try:
         with engine.connect() as connection:
-            train, y_train = load_with_volume(connection, "train", artifact)
-            model = clone(artifact["model"])
+            history = load_history(connection)
+            train, y_train = load_experiment_split(
+                connection, "train", artifact, history
+            )
 
+            model = clone(artifact["model"])
             print(f"Fitting on {len(y_train):,} flights...", flush=True)
             started = perf_counter()
             model.fit(train, y_train)
             fit_seconds = perf_counter() - started
             del train
 
-            validation, labels = load_with_volume(
-                connection, "validation", artifact
+            validation, labels = load_experiment_split(
+                connection, "validation", artifact, history
             )
     finally:
         engine.dispose()
@@ -134,28 +154,40 @@ def main():
     scores = model.predict_proba(validation)[:, 1]
     precision, recall, thresholds = precision_recall_curve(labels, scores)
     eligible = np.flatnonzero(precision[:-1] >= 0.40)
-    metrics = {"schedule_volume_at_0_5": evaluate(labels, scores, 0.5)}
+    metrics = {"history_rates_at_0_5": evaluate(labels, scores, 0.5)}
 
     if eligible.size:
         best = eligible[np.argmax(recall[eligible])]
-        metrics["schedule_volume_at_min_40_precision"] = evaluate(
+        metrics["history_rates_at_min_40_precision"] = evaluate(
             labels, scores, float(thresholds[best])
         )
 
+    availability = (
+        history[["month", "available_at"]]
+        .drop_duplicates()
+        .sort_values("month")
+    )
     report_dir = ROOT / "reports" / "experiments" / run_id
     save_results({
         "run_id": run_id,
-        "comparison_run": BASE_RUN,
-        "added_features": VOLUME_COLUMNS,
+        "comparison_run": COMPARISON_RUN,
+        "added_features": RATE_COLUMNS,
         "parameters": model.get_params(),
         "fit_seconds": fit_seconds,
         "training_rows": len(y_train),
         "validation_rows": len(labels),
+        "history_source": ARCHIVE_INDEX,
+        "availability_buffer_days": AVAILABILITY_BUFFER_DAYS,
+        "airport_prior_flights": AIRPORT_PRIOR_FLIGHTS,
+        "available_at_by_month": {
+            row.month: row.available_at.isoformat()
+            for row in availability.itertuples(index=False)
+        },
         "metrics": metrics,
     }, report_dir)
 
-    print(f"Validation AP: {metrics['schedule_volume_at_0_5']['average_precision']:.5f}")
-    operating_point = metrics.get("schedule_volume_at_min_40_precision")
+    print(f"Validation AP: {metrics['history_rates_at_0_5']['average_precision']:.5f}")
+    operating_point = metrics.get("history_rates_at_min_40_precision")
     if operating_point:
         print(f"Recall at ≥40% precision: {operating_point['recall']:.2%}")
     else:
