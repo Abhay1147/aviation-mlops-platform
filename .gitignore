@@ -21,3 +21,5 @@ data/
 .vscode/
 
 .ipynb_checkpoints/
+
+reports/logs/
