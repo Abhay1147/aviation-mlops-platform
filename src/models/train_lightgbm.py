@@ -1,4 +1,3 @@
-import gc
 import json
 import os
 import platform
@@ -13,7 +12,7 @@ import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.base import clone
-from sklearn.model_selection import GridSearchCV, PredefinedSplit
+from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV
 
 from src.models.evaluation import evaluate, save_results
 from src.prepare_model_data import (
@@ -31,11 +30,20 @@ CATEGORY_COLUMNS = CATEGORICAL_FEATURES
 NUMBER_COLUMNS = NUMERIC_FEATURES + BOOLEAN_FEATURES
 FEATURES = CATEGORY_COLUMNS + NUMBER_COLUMNS
 
-PARAMETER_GRID = {
-    "n_estimators": [300, 600],
-    "num_leaves": [15, 31],
-    "learning_rate": [0.05, 0.10],
+SEARCH_SPACE = {
+    "n_estimators": [200, 300, 600],
+    "learning_rate": [0.025, 0.05, 0.10],
+    "num_leaves": [15, 31, 63],
+    "max_depth": [-1, 6, 10],
+    "min_child_samples": [50, 100, 250, 500],
+    "reg_alpha": [0.0, 0.1, 1.0],
+    "reg_lambda": [0.1, 1.0, 5.0, 10.0],
+    "subsample": [0.7, 0.9, 1.0],
+    "colsample_bytree": [0.7, 0.9, 1.0],
 }
+
+SEARCH_ITERATIONS = 20
+SEED = 42
 
 
 def load_split(name):
@@ -59,10 +67,11 @@ def load_split(name):
 
 
 def main():
-    total_start = time.perf_counter()
+    started = time.perf_counter()
+
     run_id = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "_lightgbm_"
+        + "_lightgbm_random_"
         + uuid4().hex[:6]
     )
 
@@ -72,14 +81,13 @@ def main():
     model_dir.mkdir(parents=True, exist_ok=False)
 
     print(f"Run: {run_id}", flush=True)
-    print("Loading training and validation features...", flush=True)
+    print("Loading training and validation data...", flush=True)
 
     preprocessing_start = time.perf_counter()
 
     train, y_train = load_split("train")
     validation, y_validation = load_split("validation")
 
-    # Learn category vocabularies from training only.
     category_levels = {}
 
     for column in CATEGORY_COLUMNS:
@@ -93,49 +101,54 @@ def main():
             train_values,
             categories=levels
         )
-        validation[column] = pd.Categorical(
+
+        validation_values = (
             validation[column]
             .astype("string")
-            .fillna("__MISSING__"),
+            .fillna("__MISSING__")
+        )
+        validation_values = validation_values.where(
+            validation_values.isin(levels)
+        )
+
+        validation[column] = pd.Categorical(
+            validation_values,
             categories=levels
         )
 
     train_rows = len(train)
     validation_rows = len(validation)
 
-    features = pd.concat(
-        [train, validation],
-        ignore_index=True
-    )
+    features = pd.concat([train, validation], ignore_index=True)
     labels = np.concatenate([y_train, y_validation])
 
     del train, validation
-    gc.collect()
 
-    # -1 = always training; 0 = validation for the single split.
-    fold_assignment = np.concatenate([
-        np.full(train_rows, -1, dtype=np.int8),
-        np.zeros(validation_rows, dtype=np.int8),
-    ])
-    split = PredefinedSplit(fold_assignment)
+    split = PredefinedSplit(
+        np.concatenate([
+            np.full(train_rows, -1, dtype=np.int8),
+            np.zeros(validation_rows, dtype=np.int8),
+        ])
+    )
 
     preprocessing_seconds = time.perf_counter() - preprocessing_start
 
     base_model = LGBMClassifier(
         objective="binary",
-        random_state=42,
+        random_state=SEED,
         n_jobs=2,
-        min_child_samples=100,
-        reg_lambda=1.0,
+        subsample_freq=1,
         max_bin=63,
         force_col_wise=True,
         deterministic=True,
         verbosity=-1
     )
 
-    search = GridSearchCV(
+    search = RandomizedSearchCV(
         estimator=base_model,
-        param_grid=PARAMETER_GRID,
+        param_distributions=SEARCH_SPACE,
+        n_iter=SEARCH_ITERATIONS,
+        random_state=SEED,
         scoring={
             "average_precision": "average_precision",
             "roc_auc": "roc_auc",
@@ -150,36 +163,40 @@ def main():
         verbose=2
     )
 
-    print("Starting eight sequential configurations...", flush=True)
+    print(
+        f"Searching {SEARCH_ITERATIONS} configurations sequentially...",
+        flush=True
+    )
+
     search_start = time.perf_counter()
     search.fit(features, labels)
     search_seconds = time.perf_counter() - search_start
 
-    cv_results = search.cv_results_
     candidates = []
 
-    for index, parameters in enumerate(cv_results["params"]):
+    for index, parameters in enumerate(search.cv_results_["params"]):
         candidates.append({
             "configuration": index + 1,
             "parameters": parameters,
             "validation_average_precision": float(
-                cv_results["mean_test_average_precision"][index]
+                search.cv_results_[
+                    "mean_test_average_precision"
+                ][index]
             ),
             "validation_roc_auc": float(
-                cv_results["mean_test_roc_auc"][index]
+                search.cv_results_["mean_test_roc_auc"][index]
             ),
             "validation_log_loss": float(
-                -cv_results["mean_test_neg_log_loss"][index]
+                -search.cv_results_["mean_test_neg_log_loss"][index]
             ),
             "fit_seconds": float(
-                cv_results["mean_fit_time"][index]
+                search.cv_results_["mean_fit_time"][index]
             ),
             "score_seconds": float(
-                cv_results["mean_score_time"][index]
+                search.cv_results_["mean_score_time"][index]
             ),
         })
 
-    # Primary: highest AP. Tie-breaker: lowest log loss.
     ranked = sorted(
         candidates,
         key=lambda row: (
@@ -187,7 +204,6 @@ def main():
             row["validation_log_loss"]
         )
     )
-    best_parameters = ranked[0]["parameters"]
 
     pd.DataFrame([
         {
@@ -199,23 +215,20 @@ def main():
             },
         }
         for row in ranked
-    ]).to_csv(report_dir / "grid_results.csv", index=False)
+    ]).to_csv(report_dir / "search_results.csv", index=False)
 
+    best_parameters = ranked[0]["parameters"]
     print(f"Best parameters: {best_parameters}", flush=True)
 
-    # GridSearchCV with refit=False doesn't retain a fitted winner.
-    # Fit the selected configuration again, on training rows only.
-    best_model = clone(base_model).set_params(**best_parameters)
+    # Refit on training rows only, preserving validation separation.
+    model = clone(base_model).set_params(**best_parameters)
 
-    final_fit_start = time.perf_counter()
-    best_model.fit(
-        features.iloc[:train_rows],
-        y_train
-    )
-    final_fit_seconds = time.perf_counter() - final_fit_start
+    fit_start = time.perf_counter()
+    model.fit(features.iloc[:train_rows], y_train)
+    fit_seconds = time.perf_counter() - fit_start
 
     prediction_start = time.perf_counter()
-    probabilities = best_model.predict_proba(
+    probabilities = model.predict_proba(
         features.iloc[train_rows:]
     )[:, 1]
     prediction_seconds = time.perf_counter() - prediction_start
@@ -229,9 +242,10 @@ def main():
     }
 
     model_path = model_dir / "lightgbm.joblib"
+
     joblib.dump(
         {
-            "model": best_model,
+            "model": model,
             "features": FEATURES,
             "category_columns": CATEGORY_COLUMNS,
             "category_levels": category_levels,
@@ -245,13 +259,14 @@ def main():
         "run_id": run_id,
         "git_commit": os.getenv("GIT_COMMIT", "not supplied"),
         "model": "LightGBM",
-        "selection_rule": (
-            "Highest validation average precision; "
-            "lowest log loss breaks ties."
-        ),
-        "parameter_grid": PARAMETER_GRID,
-        "selected_parameters": best_model.get_params(),
+        "search_method": "RandomizedSearchCV",
+        "search_seed": SEED,
+        "search_space": SEARCH_SPACE,
         "configurations_evaluated": len(candidates),
+        "selection_rule": (
+            "Highest validation AP; lowest log loss breaks ties."
+        ),
+        "selected_parameters": model.get_params(),
         "candidate_results": ranked,
         "training_rows": train_rows,
         "validation_rows": validation_rows,
@@ -259,15 +274,15 @@ def main():
         "validation_period": "2026-01-01 to 2026-05-01 exclusive",
         "features": FEATURES,
         "preprocessing": (
-            "Training-only category vocabulary; float32 numeric values; "
-            "LightGBM handles missing numeric and unknown category values."
+            "Training-only categorical vocabulary; unknown categories "
+            "become missing; float32 numeric values; native missing handling."
         ),
         "timings_seconds": {
             "loading_and_preprocessing": preprocessing_seconds,
-            "grid_search": search_seconds,
-            "selected_model_refit": final_fit_seconds,
+            "randomized_search": search_seconds,
+            "selected_model_refit": fit_seconds,
             "validation_prediction": prediction_seconds,
-            "total_before_report_write": time.perf_counter() - total_start,
+            "total_before_report_write": time.perf_counter() - started,
         },
         "environment": {
             "python": platform.python_version(),
@@ -290,7 +305,7 @@ def main():
     print(json.dumps(metrics, indent=2))
     print(f"Model saved: {model_path}")
     print(f"Results: {report_dir / 'results.txt'}")
-    print(f"Grid comparison: {report_dir / 'grid_results.csv'}")
+    print(f"Search comparison: {report_dir / 'search_results.csv'}")
 
 
 if __name__ == "__main__":
