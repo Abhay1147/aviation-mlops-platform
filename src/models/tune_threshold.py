@@ -4,6 +4,7 @@ import time
 
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.metrics import precision_recall_curve
 
 from src.models.evaluation import evaluate, save_results
@@ -13,6 +14,41 @@ from src.models.train_baseline import (
     read_batches,
     transform,
 )
+
+
+def prepare_features(frame, artifact, model_type):
+    if model_type == "baseline":
+        return transform(
+            frame,
+            artifact["encoder"],
+            artifact["scaler"]
+        )
+
+    features = frame[artifact["features"]].copy()
+
+    for column in artifact["category_columns"]:
+        levels = artifact["category_levels"][column]
+
+        values = (
+            features[column]
+            .astype("string")
+            .fillna("__MISSING__")
+        )
+
+        # Unknown categories become missing without extending
+        # the category vocabulary learned during training.
+        values = values.where(values.isin(levels))
+
+        features[column] = pd.Categorical(
+            values,
+            categories=levels
+        )
+
+    for column in artifact["features"]:
+        if column not in artifact["category_columns"]:
+            features[column] = features[column].astype("float32")
+
+    return features
 
 
 def threshold_counts(labels, probabilities, threshold):
@@ -25,6 +61,7 @@ def threshold_counts(labels, probabilities, threshold):
 
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
+
     f1 = (
         2 * precision * recall / (precision + recall)
         if precision + recall else 0.0
@@ -39,55 +76,83 @@ def threshold_counts(labels, probabilities, threshold):
     }
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
-        description="Select a decision threshold using validation data."
+        description="Select a threshold using validation data only."
     )
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--min-precision", type=float, default=0.40)
-    parser.add_argument("--min-recall", type=float, default=0.50)
+    parser.add_argument(
+        "--model",
+        choices=["baseline", "lightgbm"],
+        default="baseline"
+    )
+    parser.add_argument(
+        "--min-precision",
+        type=float,
+        default=0.40
+    )
+    parser.add_argument(
+        "--min-recall",
+        type=float,
+        default=0.50
+    )
+
     args = parser.parse_args()
 
     if not (
         0 < args.min_precision <= 1
         and 0 < args.min_recall <= 1
     ):
-        parser.error("Precision and recall targets must be in (0, 1].")
+        parser.error(
+            "Precision and recall targets must be in (0, 1]."
+        )
 
+    return args
+
+
+def main():
+    args = parse_args()
     started = time.perf_counter()
 
     model_dir = ROOT / "data" / "models" / args.run_id
-    original_path = model_dir / "baseline.joblib"
+    original_path = model_dir / f"{args.model}.joblib"
+
     artifact = joblib.load(original_path)
 
-    labels_parts = []
+    label_parts = []
     probability_parts = []
 
     print("Predicting validation flights...", flush=True)
 
     for frame in read_batches("validation", batch_size=50000):
-        features = transform(
+        features = prepare_features(
             frame,
-            artifact["encoder"],
-            artifact["scaler"]
+            artifact,
+            args.model
         )
 
-        labels_parts.append(
+        label_parts.append(
             frame[TARGET].to_numpy(dtype=np.int8)
         )
         probability_parts.append(
             artifact["model"].predict_proba(features)[:, 1]
         )
 
-    labels = np.concatenate(labels_parts)
+    if not label_parts:
+        raise ValueError("Validation data is empty.")
+
+    labels = np.concatenate(label_parts)
     probabilities = np.concatenate(probability_parts)
+
+    if not np.isfinite(probabilities).all():
+        raise ValueError("Model produced invalid probabilities.")
 
     precision, recall, thresholds = precision_recall_curve(
         labels,
         probabilities
     )
 
-    # The final precision/recall pair has no corresponding threshold.
+    # The last precision/recall pair has no corresponding threshold.
     precision = precision[:-1]
     recall = recall[:-1]
 
@@ -118,9 +183,15 @@ def main():
     chosen_threshold = float(thresholds[chosen_index])
 
     comparison_thresholds = sorted(set([
-        0.10, 0.15, 0.20, 0.25,
-        0.30, 0.35, 0.40, 0.50,
-        chosen_threshold
+        0.10,
+        0.15,
+        0.20,
+        0.25,
+        0.30,
+        0.35,
+        0.40,
+        0.50,
+        chosen_threshold,
     ]))
 
     comparison = [
@@ -141,14 +212,17 @@ def main():
 
     metrics = {
         "original_threshold": evaluate(
-            labels, probabilities, threshold=0.5
+            labels,
+            probabilities,
+            threshold=0.5
         ),
         "validation_selected_threshold": evaluate(
-            labels, probabilities, threshold=chosen_threshold
+            labels,
+            probabilities,
+            threshold=chosen_threshold
         ),
     }
 
-    # Save a separate artifact; preserve the original baseline.
     artifact["threshold"] = chosen_threshold
     artifact["threshold_selection"] = {
         "split": "validation",
@@ -158,11 +232,14 @@ def main():
         "minimum_recall": args.min_recall,
     }
 
-    adjusted_path = model_dir / "baseline_thresholded.joblib"
+    adjusted_path = (
+        model_dir / f"{args.model}_thresholded.joblib"
+    )
     joblib.dump(artifact, adjusted_path)
 
     results = {
         "source_run_id": args.run_id,
+        "model_type": args.model,
         "source_model": str(original_path),
         "adjusted_model": str(adjusted_path),
         "model_retrained": False,
