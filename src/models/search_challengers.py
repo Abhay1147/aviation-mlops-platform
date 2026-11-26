@@ -11,7 +11,8 @@ from sqlalchemy import URL, create_engine
 from xgboost import XGBClassifier
 
 from src.models.evaluation import evaluate
-from src.models.final_evaluation import BASE_RUN, ROOT, load_features
+from src.models.train_lightgbm import ROOT
+from src.models.volume_features import BASE_RUN, load_features
 
 import os
 
