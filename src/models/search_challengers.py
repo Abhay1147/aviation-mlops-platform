@@ -128,14 +128,15 @@ def main():
                 scores = model.predict_proba(validation)[:, 1].astype(np.float64)
                 metrics, threshold, monthly = score_validation(y_val, scores, months)
                 recall_at_floor = metrics["recall"] if threshold is not None else None
+
                 parameters = model.get_params()
                 missing = parameters.get("missing")
                 if isinstance(missing, (float, np.floating)) and np.isnan(missing):
-                    parameters["missing"] = "NaN"                
+                    parameters["missing"] = "NaN"
 
                 result = {
                     "trial": trial,
-                    "parameters": model.get_params(),
+                    "parameters": parameters,
                     "fit_seconds": fit_seconds,
                     "train_sample_ap": float(
                         average_precision_score(y_train[sample], train_scores)
